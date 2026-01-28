@@ -1,4 +1,4 @@
-# 小窗浏览器 🖥️
+# 小窗 🖥️
 
 ![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey.svg)
@@ -8,7 +8,7 @@
 > **专为游戏玩家打造的沉浸式“画中画”副屏浏览器。**
 > *Developed for Gamers, by Gamers.*
 
-**小窗 (LiteBrowser)** 是一款基于 Microsoft WebView2 内核开发的超轻量级 Windows 浏览器。它解决了全屏/无边框游戏玩家在挂机、跑图时观看视频的痛点，提供了**鼠标穿透**、**智能热键**、**沉浸式挂机**等独家功能，完美兼容《原神》、《崩坏：星穹铁道》等各类游戏及其自动化脚本工具。
+**小窗** 是一款基于 Microsoft WebView2 内核开发的超轻量级 Windows 浏览器。它解决了全屏/无边框游戏玩家在挂机、跑图时观看视频的痛点，提供了**鼠标穿透**、**智能热键**、**沉浸式挂机**等独家功能，完美兼容《原神》、《崩坏：星穹铁道》等各类游戏及其自动化脚本工具。
 
 ---
 
