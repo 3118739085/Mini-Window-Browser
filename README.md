@@ -51,8 +51,8 @@
 
 1.  进入 [Releases](../../releases) 页面下载最新版本的压缩包。
 2.  解压到任意文件夹。
-3.  确保文件夹内包含 `XiaoChuang.exe` 和 `WebView2Loader.dll`。
-4.  **运行**：双击 `XiaoChuang.exe` 即可使用。
+3.  确保文件夹内包含 `小窗.exe` 和 `WebView2Loader.dll`。
+4.  **运行**：双击 `小窗.exe` 即可使用。
     * *首次运行如果提示缺少组件，请下载安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)*。
 
 ---
