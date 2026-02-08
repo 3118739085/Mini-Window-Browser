@@ -1,10 +1,4 @@
-﻿// ===========================================================================
-// 项目名称：小窗 (LiteBrowser) - v1.1 Dev (BugFix)
-// 作者：Gemini & User
-// 更新日志：
-//   - [修复] 修复老板键隐藏窗口时，WebView2 画面残留/位置不同步的 Bug (Ghost Window)。
-//   - [优化] 显式控制 WebView2 的 IsVisible 属性，确保隐藏彻底。
-// ===========================================================================
+﻿#define NOMINMAX 
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -16,6 +10,7 @@
 #include <vector>
 #include <cmath>
 #include <cstdio>
+#include <algorithm> 
 #include <commctrl.h> 
 
 #include <wrl.h>
@@ -49,11 +44,33 @@ struct TabData {
     std::wstring url;
 };
 
+struct Bookmark {
+    std::wstring title;
+    std::wstring url;
+};
+
+struct Preset {
+    std::wstring name;
+    int x, y, w, h;
+    int holeRadius;
+    int snapThreshold;
+    bool autoPause;
+    std::wstring homeUrl;
+    std::wstring currentUrl;
+};
+
 const int DRAG_BAR_HEIGHT = 12;
 const int TAB_BAR_HEIGHT = 28;
 const int NAV_BAR_HEIGHT = 30;
 const int TOTAL_TOP_HEIGHT = DRAG_BAR_HEIGHT + TAB_BAR_HEIGHT + NAV_BAR_HEIGHT;
 const int TAB_WIDTH = 140;
+
+// 列表常量
+const int BM_ROW_HEIGHT = 35;
+const int BM_BTN_SIZE = 30;
+const int BM_MAX_HEIGHT = 400;
+const int PRESET_WIN_WIDTH = 400;
+const int PRESET_WIN_HEIGHT = 500;
 
 // =============================================================
 //  全局变量
@@ -68,10 +85,22 @@ HWND g_hBtnMove;
 HWND g_hTabCtrl;
 HWND g_hBtnAddTab;
 HWND g_hBtnCloseTab;
+HWND g_hBtnCloseApp;
 HWND g_hChkAutoPause;
 HWND g_hEditHome;
 
+// 书签与预设控件
+HWND g_hBtnStar;
+HWND g_hBtnBmList;
+HWND g_hBmPopup = NULL;
+
+HWND g_hBtnPreset;
+HWND g_hPresetWin = NULL;
+HWND g_hNameInputPopup = NULL;
+std::wstring g_tempPresetName;
+
 WNDPROC g_OldBtnProc;
+WNDPROC g_OldEditProc;
 
 wil::com_ptr<ICoreWebView2Controller> g_controller;
 wil::com_ptr<ICoreWebView2> g_webview;
@@ -87,29 +116,43 @@ int g_holeRadius = 400;
 int g_snapThreshold = 20;
 std::wstring g_homeUrl = L"https://www.bilibili.com";
 
-// --- 标签页状态 ---
+// --- 数据状态 ---
 std::vector<TabData> g_tabs;
+std::vector<Bookmark> g_bookmarks;
+std::vector<Preset> g_presets;
+
 int g_currentTabIndex = 0;
 bool g_isNavigatingFromTabSwitch = false;
 
-// --- 窗口位置记忆 ---
 int g_winX = 100; int g_winY = 100; int g_winW = 1000; int g_winH = 600;
-
 TCHAR g_iniPath[MAX_PATH] = { 0 };
 
 // --- 控件 ID ---
-#define IDC_ADDRESS_BAR 9001
-#define IDC_GO_BUTTON   9002
-#define IDC_SET_BUTTON  9003
-#define IDC_MOVE_BUTTON 9004
-#define IDC_TAB_CTRL    9005
-#define IDC_ADD_TAB     9006
-#define IDC_CLOSE_TAB   9007
+#define IDC_ADDRESS_BAR   9001
+#define IDC_GO_BUTTON     9002
+#define IDC_SET_BUTTON    9003
+#define IDC_MOVE_BUTTON   9004
+#define IDC_TAB_CTRL      9005
+#define IDC_ADD_TAB       9006
+#define IDC_CLOSE_TAB     9007
+#define IDC_BTN_CLOSE_APP 9008
+#define IDC_BTN_STAR      9009 
+#define IDC_BTN_BMLIST    9010 
+#define IDC_BTN_PRESET    9011 
+
+// 动态ID起始
+#define IDC_BM_ROW_BASE     20000
+#define IDC_PRESET_ROW_BASE 30000
+#define IDC_PRESET_ADD      39999
+#define IDC_PRESET_RESET    39996 
+#define IDC_NAME_EDIT       39998
+#define IDC_NAME_OK         39997
 
 #define IDC_SET_RADIUS    9101
 #define IDC_SET_SNAP      9102
 #define IDC_CHK_AUTOPAUSE 9103
 #define IDC_EDIT_HOME     9104 
+
 #define IDC_BTN_HK1       9111
 #define IDC_BTN_HK2       9112
 #define IDC_BTN_HK3       9113
@@ -131,6 +174,21 @@ AppHotkey g_hkHideWin = { 107, 0, '9', L"隐藏/显示" };
 //  前向声明
 // =============================================================
 void OpenSettingsWindow(HWND hParent);
+void ShowBookmarkList(HWND hParent);
+void ShowPresetList(HWND hParent);
+void ShowNameInputWindow(HWND hParent);
+void UpdateStarIcon();
+void SaveBookmarks();
+void LoadBookmarks();
+void SavePresets();
+void LoadPresets();
+void CaptureAndAddPreset(const std::wstring& name);
+void ApplyPreset(int index);
+void RestoreDefaultSettings();
+
+bool IsCurrentUrlBookmarked();
+void ToggleCurrentBookmark();
+
 void CheckAndRestartAsAdmin(HINSTANCE hInstance);
 void InitConfigPath();
 std::wstring GetHotkeyString(UINT mod, UINT vk);
@@ -152,7 +210,11 @@ void SwitchToTab(int index);
 void UpdateTabTitle(int index, LPCWSTR title);
 void HandleTabClick(LPARAM lParam);
 LRESULT CALLBACK DragButtonProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK EditWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK SettingsWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK BookmarkWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK PresetWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK NameInputWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 
 // =============================================================
@@ -212,6 +274,201 @@ std::wstring GetHotkeyString(UINT mod, UINT vk) {
     return str;
 }
 
+// ================= 书签与预设管理 =================
+
+void SaveBookmarks() {
+    WritePrivateProfileSection(_T("Bookmarks"), NULL, g_iniPath);
+    WCHAR buf[32];
+    _itot_s((int)g_bookmarks.size(), buf, 10);
+    WritePrivateProfileString(_T("Bookmarks"), _T("Count"), buf, g_iniPath);
+    for (size_t i = 0; i < g_bookmarks.size(); ++i) {
+        std::wstring keyTitle = L"Title" + std::to_wstring(i);
+        std::wstring keyUrl = L"Url" + std::to_wstring(i);
+        WritePrivateProfileString(_T("Bookmarks"), keyTitle.c_str(), g_bookmarks[i].title.c_str(), g_iniPath);
+        WritePrivateProfileString(_T("Bookmarks"), keyUrl.c_str(), g_bookmarks[i].url.c_str(), g_iniPath);
+    }
+}
+
+void LoadBookmarks() {
+    g_bookmarks.clear();
+    int count = GetPrivateProfileInt(_T("Bookmarks"), _T("Count"), 0, g_iniPath);
+    for (int i = 0; i < count; ++i) {
+        std::wstring keyTitle = L"Title" + std::to_wstring(i);
+        std::wstring keyUrl = L"Url" + std::to_wstring(i);
+        TCHAR title[2048], url[2048];
+        GetPrivateProfileString(_T("Bookmarks"), keyTitle.c_str(), L"Bookmark", title, 2048, g_iniPath);
+        GetPrivateProfileString(_T("Bookmarks"), keyUrl.c_str(), L"", url, 2048, g_iniPath);
+        g_bookmarks.push_back({ title, url });
+    }
+}
+
+void SavePresets() {
+    WritePrivateProfileSection(_T("Presets"), NULL, g_iniPath);
+    WCHAR buf[32];
+    _itot_s((int)g_presets.size(), buf, 10);
+    WritePrivateProfileString(_T("Presets"), _T("Count"), buf, g_iniPath);
+
+    for (size_t i = 0; i < g_presets.size(); ++i) {
+        std::wstring p = L"P" + std::to_wstring(i) + L"_";
+        WritePrivateProfileString(_T("Presets"), (p + L"Name").c_str(), g_presets[i].name.c_str(), g_iniPath);
+        WritePrivateProfileString(_T("Presets"), (p + L"HomeUrl").c_str(), g_presets[i].homeUrl.c_str(), g_iniPath);
+        WritePrivateProfileString(_T("Presets"), (p + L"CurUrl").c_str(), g_presets[i].currentUrl.c_str(), g_iniPath);
+
+        _itot_s(g_presets[i].x, buf, 10); WritePrivateProfileString(_T("Presets"), (p + L"X").c_str(), buf, g_iniPath);
+        _itot_s(g_presets[i].y, buf, 10); WritePrivateProfileString(_T("Presets"), (p + L"Y").c_str(), buf, g_iniPath);
+        _itot_s(g_presets[i].w, buf, 10); WritePrivateProfileString(_T("Presets"), (p + L"W").c_str(), buf, g_iniPath);
+        _itot_s(g_presets[i].h, buf, 10); WritePrivateProfileString(_T("Presets"), (p + L"H").c_str(), buf, g_iniPath);
+        _itot_s(g_presets[i].holeRadius, buf, 10); WritePrivateProfileString(_T("Presets"), (p + L"Rad").c_str(), buf, g_iniPath);
+        _itot_s(g_presets[i].snapThreshold, buf, 10); WritePrivateProfileString(_T("Presets"), (p + L"Snap").c_str(), buf, g_iniPath);
+        _itot_s(g_presets[i].autoPause ? 1 : 0, buf, 10); WritePrivateProfileString(_T("Presets"), (p + L"Pause").c_str(), buf, g_iniPath);
+    }
+}
+
+void LoadPresets() {
+    g_presets.clear();
+    int count = GetPrivateProfileInt(_T("Presets"), _T("Count"), 0, g_iniPath);
+    for (int i = 0; i < count; ++i) {
+        Preset p;
+        std::wstring pre = L"P" + std::to_wstring(i) + L"_";
+        TCHAR buf[2048];
+        GetPrivateProfileString(_T("Presets"), (pre + L"Name").c_str(), L"Preset", buf, 2048, g_iniPath); p.name = buf;
+        GetPrivateProfileString(_T("Presets"), (pre + L"HomeUrl").c_str(), L"", buf, 2048, g_iniPath); p.homeUrl = buf;
+        GetPrivateProfileString(_T("Presets"), (pre + L"CurUrl").c_str(), L"", buf, 2048, g_iniPath); p.currentUrl = buf;
+
+        p.x = GetPrivateProfileInt(_T("Presets"), (pre + L"X").c_str(), 100, g_iniPath);
+        p.y = GetPrivateProfileInt(_T("Presets"), (pre + L"Y").c_str(), 100, g_iniPath);
+        p.w = GetPrivateProfileInt(_T("Presets"), (pre + L"W").c_str(), 1000, g_iniPath);
+        p.h = GetPrivateProfileInt(_T("Presets"), (pre + L"H").c_str(), 600, g_iniPath);
+        p.holeRadius = GetPrivateProfileInt(_T("Presets"), (pre + L"Rad").c_str(), 400, g_iniPath);
+        p.snapThreshold = GetPrivateProfileInt(_T("Presets"), (pre + L"Snap").c_str(), 20, g_iniPath);
+        p.autoPause = GetPrivateProfileInt(_T("Presets"), (pre + L"Pause").c_str(), 1, g_iniPath) != 0;
+
+        g_presets.push_back(p);
+    }
+}
+
+void CaptureAndAddPreset(const std::wstring& name) {
+    Preset p;
+    p.name = name;
+
+    RECT rc; GetWindowRect(g_hWnd, &rc);
+    p.x = rc.left;
+    p.y = rc.top;
+    p.w = rc.right - rc.left;
+    p.h = rc.bottom - rc.top;
+
+    p.holeRadius = g_holeRadius;
+    p.snapThreshold = g_snapThreshold;
+    p.autoPause = g_autoPauseOnHide;
+    p.homeUrl = g_homeUrl;
+
+    if (g_currentTabIndex >= 0 && g_currentTabIndex < g_tabs.size()) {
+        p.currentUrl = g_tabs[g_currentTabIndex].url;
+    }
+    else {
+        p.currentUrl = g_homeUrl;
+    }
+
+    g_presets.push_back(p);
+    SavePresets();
+}
+
+void RestoreDefaultSettings() {
+    g_holeRadius = 400;
+    g_snapThreshold = 20;
+    g_autoPauseOnHide = true;
+    g_homeUrl = L"https://www.bilibili.com";
+
+    if (g_isImmersionMode) {
+        SendMessage(g_hWnd, WM_HOTKEY, g_hkImmersion.id, 0);
+    }
+    MoveWindow(g_hWnd, 100, 100, 1000, 600, TRUE);
+
+    if (g_webview) {
+        if (g_currentTabIndex >= 0 && g_currentTabIndex < g_tabs.size()) {
+            g_tabs[g_currentTabIndex].url = g_homeUrl;
+        }
+        g_webview->Navigate(g_homeUrl.c_str());
+    }
+
+    UpdateStarIcon();
+    SaveConfig();
+}
+
+void ApplyPreset(int index) {
+    if (index < 0 || index >= g_presets.size()) return;
+    const Preset& p = g_presets[index];
+
+    g_holeRadius = p.holeRadius;
+    g_snapThreshold = p.snapThreshold;
+    g_autoPauseOnHide = p.autoPause;
+    g_homeUrl = p.homeUrl;
+
+    if (g_isImmersionMode) {
+        g_isImmersionMode = false;
+        SetWindowRgn(g_hWnd, NULL, TRUE);
+        LONG_PTR exStyle = GetWindowLongPtr(g_hWnd, GWL_EXSTYLE);
+        SetWindowLong(g_hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE | WS_THICKFRAME);
+        SetWindowLongPtr(g_hWnd, GWL_EXSTYLE, exStyle & ~(WS_EX_LAYERED | WS_EX_TRANSPARENT));
+        ShowWindow(g_hEditUrl, SW_SHOW); ShowWindow(g_hBtnGo, SW_SHOW); ShowWindow(g_hBtnSet, SW_SHOW);
+        ShowWindow(g_hTabCtrl, SW_SHOW); ShowWindow(g_hBtnAddTab, SW_SHOW); ShowWindow(g_hBtnCloseTab, SW_SHOW);
+        ShowWindow(g_hBtnCloseApp, SW_SHOW); ShowWindow(g_hBtnStar, SW_SHOW); ShowWindow(g_hBtnBmList, SW_SHOW); ShowWindow(g_hBtnPreset, SW_SHOW);
+        ResizeLayout(g_hWnd);
+    }
+
+    MoveWindow(g_hWnd, p.x, p.y, p.w, p.h, TRUE);
+
+    if (g_webview && !p.currentUrl.empty()) {
+        if (g_currentTabIndex >= 0 && g_currentTabIndex < g_tabs.size()) {
+            g_tabs[g_currentTabIndex].url = p.currentUrl;
+        }
+        g_webview->Navigate(p.currentUrl.c_str());
+        UpdateStarIcon();
+    }
+}
+
+bool IsCurrentUrlBookmarked() {
+    if (g_currentTabIndex < 0 || g_currentTabIndex >= g_tabs.size()) return false;
+    std::wstring curUrl = g_tabs[g_currentTabIndex].url;
+    auto Normalize = [](std::wstring u) {
+        if (!u.empty() && u.back() == L'/') u.pop_back();
+        return u;
+        };
+    std::wstring cleanCur = Normalize(curUrl);
+    for (const auto& bm : g_bookmarks) {
+        if (Normalize(bm.url) == cleanCur) return true;
+    }
+    return false;
+}
+
+void UpdateStarIcon() {
+    if (g_hBtnStar) {
+        SetWindowText(g_hBtnStar, IsCurrentUrlBookmarked() ? L"★" : L"☆");
+    }
+}
+
+void ToggleCurrentBookmark() {
+    if (g_currentTabIndex < 0 || g_currentTabIndex >= g_tabs.size()) return;
+    std::wstring curUrl = g_tabs[g_currentTabIndex].url;
+    std::wstring curTitle = g_tabs[g_currentTabIndex].title;
+    bool found = false;
+    for (auto it = g_bookmarks.begin(); it != g_bookmarks.end(); ++it) {
+        if (it->url == curUrl) {
+            g_bookmarks.erase(it);
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        g_bookmarks.push_back({ curTitle, curUrl });
+    }
+    SaveBookmarks();
+    UpdateStarIcon();
+    if (g_hBmPopup && IsWindow(g_hBmPopup)) SendMessage(g_hBmPopup, WM_CLOSE, 0, 0);
+}
+
+// ===========================================
+
 void SaveConfig() {
     TCHAR buffer[32];
     _itot_s(g_holeRadius, buffer, 10);
@@ -247,6 +504,9 @@ void SaveConfig() {
         _itot_s(rc.bottom - rc.top, buffer, 10); WritePrivateProfileString(_T("Session"), _T("WinH"), buffer, g_iniPath);
     }
 
+    SaveBookmarks();
+    SavePresets();
+
     auto SaveKey = [](LPCWSTR key, AppHotkey& hk) {
         WCHAR buf[32]; wsprintf(buf, L"%d,%d", hk.fsModifiers, hk.vk);
         WritePrivateProfileString(_T("Hotkeys"), key, buf, g_iniPath);
@@ -269,11 +529,15 @@ void LoadConfig() {
     TCHAR homeBuf[2048];
     GetPrivateProfileString(_T("Settings"), _T("HomeUrl"), L"https://www.bilibili.com", homeBuf, 2048, g_iniPath);
     g_homeUrl = homeBuf;
+    if (g_homeUrl.empty()) { g_homeUrl = L"https://www.bilibili.com"; }
 
     g_winX = GetPrivateProfileInt(_T("Session"), _T("WinX"), 100, g_iniPath);
     g_winY = GetPrivateProfileInt(_T("Session"), _T("WinY"), 100, g_iniPath);
     g_winW = GetPrivateProfileInt(_T("Session"), _T("WinW"), 1000, g_iniPath);
     g_winH = GetPrivateProfileInt(_T("Session"), _T("WinH"), 600, g_iniPath);
+
+    LoadBookmarks();
+    LoadPresets();
 
     auto LoadKey = [](LPCWSTR key, AppHotkey& hk, UINT defMod, UINT defVk) {
         WCHAR buf[32]; GetPrivateProfileString(_T("Hotkeys"), key, L"", buf, 32, g_iniPath);
@@ -337,8 +601,263 @@ LRESULT CALLBACK DragButtonProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     return CallWindowProc(g_OldBtnProc, hWnd, uMsg, wParam, lParam);
 }
 
+LRESULT CALLBACK EditWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (uMsg == WM_KEYDOWN && wParam == VK_RETURN) {
+        SendMessage(GetParent(hWnd), WM_COMMAND, IDC_GO_BUTTON, 0);
+        return 0;
+    }
+    return CallWindowProc(g_OldEditProc, hWnd, uMsg, wParam, lParam);
+}
+
 // =============================================================
-//  标签页管理逻辑
+//  命名弹窗 (Name Input)
+// =============================================================
+
+LRESULT CALLBACK NameInputWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    static HWND hEdit;
+    switch (message) {
+    case WM_CREATE:
+        CreateWindow(L"STATIC", L"请输入预设名称:", WS_CHILD | WS_VISIBLE, 10, 10, 200, 20, hWnd, NULL, g_hInst, NULL);
+        hEdit = CreateWindow(L"EDIT", L"我的预设", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 10, 35, 210, 25, hWnd, (HMENU)IDC_NAME_EDIT, g_hInst, NULL);
+        SendMessage(hEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        CreateWindow(L"BUTTON", L"保存", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 60, 70, 100, 30, hWnd, (HMENU)IDC_NAME_OK, g_hInst, NULL);
+        break;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_NAME_OK) {
+            WCHAR buf[256];
+            GetWindowText(hEdit, buf, 256);
+            std::wstring newName = buf;
+            if (newName.empty()) newName = L"未命名预设";
+
+            // [新增] 重名检测
+            bool exists = false;
+            for (const auto& p : g_presets) {
+                if (p.name == newName) { exists = true; break; }
+            }
+
+            if (exists) {
+                MessageBox(hWnd, L"该预设名称已存在，请换一个名字。", L"提示", MB_ICONWARNING | MB_OK);
+                return 0; // 不关闭窗口，允许用户重试
+            }
+
+            g_tempPresetName = newName;
+            CaptureAndAddPreset(g_tempPresetName);
+            DestroyWindow(hWnd);
+            // 刷新列表: 关闭并重新打开
+            if (g_hPresetWin) DestroyWindow(g_hPresetWin);
+            ShowPresetList(g_hWnd);
+        }
+        break;
+        // [修复] 核心修复：清理句柄必须在 WM_DESTROY
+    case WM_DESTROY:
+        g_hNameInputPopup = NULL;
+        EnableWindow(GetParent(hWnd), TRUE);
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        break;
+    default: return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+    return 0;
+}
+
+void ShowNameInputWindow(HWND hParent) {
+    if (g_hNameInputPopup) return;
+    WNDCLASS wc = { 0 };
+    wc.lpfnWndProc = NameInputWndProc;
+    wc.hInstance = g_hInst;
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"XiaoChuangNameInput";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClass(&wc);
+
+    // 优先以预设窗口为父，如果预设窗口不存在则以主窗口为父
+    HWND hOwner = g_hPresetWin ? g_hPresetWin : hParent;
+    RECT rc; GetWindowRect(hOwner, &rc);
+    int x = rc.left + (rc.right - rc.left) / 2 - 120;
+    int y = rc.top + (rc.bottom - rc.top) / 2 - 70;
+
+    g_hNameInputPopup = CreateWindowEx(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, L"XiaoChuangNameInput", L"新建预设",
+        WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU, x, y, 250, 150, hOwner, NULL, g_hInst, NULL);
+    EnableWindow(hOwner, FALSE);
+}
+
+// =============================================================
+//  预设独立窗口 (Preset Window)
+// =============================================================
+
+LRESULT CALLBACK PresetWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    static int scrollY = 0;
+    static int contentHeight = 0;
+
+    switch (message) {
+    case WM_CREATE: {
+        SCROLLINFO si = { sizeof(si), SIF_RANGE | SIF_PAGE, 0, 0, 0 };
+        SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+        scrollY = 0;
+
+        RECT rcClient; GetClientRect(hWnd, &rcClient);
+        int winW = rcClient.right - rcClient.left;
+
+        // 第一行：[ + 新建预设 ]
+        HWND hBtnAdd = CreateWindow(L"BUTTON", L"+ 新建预设", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, winW, BM_ROW_HEIGHT, hWnd, (HMENU)IDC_PRESET_ADD, g_hInst, NULL);
+        SendMessage(hBtnAdd, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
+        int startY = BM_ROW_HEIGHT;
+
+        for (size_t i = 0; i < g_presets.size(); ++i) {
+            int y = startY + (int)i * BM_ROW_HEIGHT;
+            int rowIdBase = IDC_PRESET_ROW_BASE + (int)i * 10;
+
+            HWND hBtnApply = CreateWindow(L"BUTTON", L"➜", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, y, BM_BTN_SIZE, BM_ROW_HEIGHT, hWnd, (HMENU)(rowIdBase + 0), g_hInst, NULL);
+            SendMessage(hBtnApply, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
+            int editW = winW - BM_BTN_SIZE * 2 - 25;
+            if (editW < 50) editW = 50;
+
+            HWND hName = CreateWindow(L"EDIT", g_presets[i].name.c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                BM_BTN_SIZE, y, editW, BM_ROW_HEIGHT, hWnd, (HMENU)(rowIdBase + 1), g_hInst, NULL);
+            SendMessage(hName, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
+            HWND hDel = CreateWindow(L"BUTTON", L"🗑", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                BM_BTN_SIZE + editW, y, BM_BTN_SIZE, BM_ROW_HEIGHT, hWnd, (HMENU)(rowIdBase + 2), g_hInst, NULL);
+            SendMessage(hDel, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        }
+
+        int listHeight = startY + (int)g_presets.size() * BM_ROW_HEIGHT;
+
+        // 底部：[ ↺ 还原默认状态 ]
+        HWND hBtnReset = CreateWindow(L"BUTTON", L"↺ 还原默认状态", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, listHeight, winW, BM_ROW_HEIGHT, hWnd, (HMENU)IDC_PRESET_RESET, g_hInst, NULL);
+        SendMessage(hBtnReset, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
+        contentHeight = listHeight + BM_ROW_HEIGHT;
+        break;
+    }
+
+    case WM_SIZE: {
+        RECT rc; GetClientRect(hWnd, &rc);
+        SCROLLINFO si = { sizeof(si), SIF_RANGE | SIF_PAGE, 0, std::max(0, contentHeight), (UINT)rc.bottom };
+        SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+        break;
+    }
+
+    case WM_VSCROLL: {
+        SCROLLINFO si = { sizeof(si), SIF_ALL };
+        GetScrollInfo(hWnd, SB_VERT, &si);
+        int oldY = si.nPos;
+        switch (LOWORD(wParam)) {
+        case SB_TOP: si.nPos = si.nMin; break;
+        case SB_BOTTOM: si.nPos = si.nMax; break;
+        case SB_LINEUP: si.nPos -= BM_ROW_HEIGHT; break;
+        case SB_LINEDOWN: si.nPos += BM_ROW_HEIGHT; break;
+        case SB_PAGEUP: si.nPos -= si.nPage; break;
+        case SB_PAGEDOWN: si.nPos += si.nPage; break;
+        case SB_THUMBTRACK: si.nPos = si.nTrackPos; break;
+        }
+        si.nPos = std::max(si.nMin, std::min(si.nPos, si.nMax - (int)si.nPage + 1));
+        if (si.nMax < (int)si.nPage) si.nPos = 0;
+        SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+        ScrollWindow(hWnd, 0, oldY - si.nPos, NULL, NULL);
+        scrollY = si.nPos;
+        return 0;
+    }
+
+                   // [新增] 滚轮支持
+    case WM_MOUSEWHEEL: {
+        SCROLLINFO si = { sizeof(si), SIF_ALL };
+        GetScrollInfo(hWnd, SB_VERT, &si);
+        int oldY = si.nPos;
+        // 每次滚动一行的高度
+        si.nPos -= (GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA) * BM_ROW_HEIGHT;
+
+        si.nPos = std::max(si.nMin, std::min(si.nPos, si.nMax - (int)si.nPage + 1));
+        if (si.nMax < (int)si.nPage) si.nPos = 0;
+
+        SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+        ScrollWindow(hWnd, 0, oldY - si.nPos, NULL, NULL);
+        scrollY = si.nPos;
+        return 0;
+    }
+
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        int code = HIWORD(wParam);
+
+        if (id == IDC_PRESET_ADD) {
+            ShowNameInputWindow(g_hPresetWin);
+        }
+        else if (id == IDC_PRESET_RESET) {
+            RestoreDefaultSettings();
+            DestroyWindow(hWnd);
+        }
+        else if (id >= IDC_PRESET_ROW_BASE && code == EN_CHANGE) {
+            int idx = (id - IDC_PRESET_ROW_BASE) / 10;
+            if (idx >= 0 && idx < g_presets.size()) {
+                WCHAR buf[256];
+                GetWindowText((HWND)lParam, buf, 256);
+                g_presets[idx].name = buf;
+            }
+        }
+        else if (id >= IDC_PRESET_ROW_BASE && code == BN_CLICKED) {
+            int idx = (id - IDC_PRESET_ROW_BASE) / 10;
+            int type = (id - IDC_PRESET_ROW_BASE) % 10; // 0=Apply, 2=Del
+
+            if (idx >= 0 && idx < g_presets.size()) {
+                if (type == 0) { // Apply
+                    ApplyPreset(idx);
+                    DestroyWindow(hWnd);
+                }
+                else if (type == 2) { // Delete
+                    g_presets.erase(g_presets.begin() + idx);
+                    SavePresets();
+                    DestroyWindow(hWnd);
+                    ShowPresetList(g_hWnd);
+                }
+            }
+        }
+        break;
+    }
+
+    case WM_DESTROY:
+        SavePresets();
+        g_hPresetWin = NULL;
+        break;
+
+    default: return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+    return 0;
+}
+
+void ShowPresetList(HWND hParent) {
+    if (g_hPresetWin && IsWindow(g_hPresetWin)) {
+        SetForegroundWindow(g_hPresetWin);
+        return;
+    }
+
+    RECT rcMain; GetWindowRect(hParent, &rcMain);
+    int mainW = rcMain.right - rcMain.left;
+    int mainH = rcMain.bottom - rcMain.top;
+    int x = rcMain.left + (mainW - PRESET_WIN_WIDTH) / 2;
+    int y = rcMain.top + (mainH - PRESET_WIN_HEIGHT) / 2;
+
+    WNDCLASS wc = { 0 };
+    wc.lpfnWndProc = PresetWndProc;
+    wc.hInstance = g_hInst;
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"XiaoChuangPresets";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClass(&wc);
+
+    g_hPresetWin = CreateWindow(L"XiaoChuangPresets", L"场景预设管理",
+        WS_VISIBLE | WS_CAPTION | WS_SYSMENU | WS_POPUPWINDOW | WS_DLGFRAME,
+        x, y, PRESET_WIN_WIDTH, PRESET_WIN_HEIGHT, hParent, NULL, g_hInst, NULL);
+}
+
+// =============================================================
+//  标签页管理逻辑 (v1.3.7 Base)
 // =============================================================
 
 std::wstring FormatTabTitle(const std::wstring& rawTitle) {
@@ -353,7 +872,12 @@ std::wstring FormatTabTitle(const std::wstring& rawTitle) {
 
 void CreateNewTab(LPCWSTR url, LPCWSTR title, bool switchToNew) {
     TabData newTab;
-    newTab.url = url;
+    std::wstring safeUrl = url;
+    if (safeUrl.empty()) {
+        safeUrl = g_homeUrl;
+        if (safeUrl.empty()) safeUrl = L"https://www.bilibili.com";
+    }
+    newTab.url = safeUrl;
     newTab.title = title;
     g_tabs.push_back(newTab);
 
@@ -365,6 +889,9 @@ void CreateNewTab(LPCWSTR url, LPCWSTR title, bool switchToNew) {
 
     if (switchToNew) {
         SwitchToTab(g_tabs.size() - 1);
+        g_isNavigatingFromTabSwitch = false;
+        UpdateTabTitle(g_tabs.size() - 1, L"加载中...");
+        UpdateStarIcon();
     }
 }
 
@@ -372,10 +899,16 @@ void CloseTab(int index) {
     if (index < 0 || index >= g_tabs.size()) return;
 
     if (g_tabs.size() == 1) {
+        if (g_webview) g_webview->Stop();
         g_tabs[0].url = g_homeUrl;
-        g_tabs[0].title = L"New Tab";
-        UpdateTabTitle(0, L"New Tab");
-        SwitchToTab(0);
+        g_tabs[0].title = L"主页";
+        UpdateTabTitle(0, L"主页");
+        SetWindowText(g_hEditUrl, g_homeUrl.c_str());
+        if (g_webview) {
+            g_isNavigatingFromTabSwitch = false;
+            g_webview->Navigate(g_homeUrl.c_str());
+        }
+        UpdateStarIcon();
         return;
     }
 
@@ -398,6 +931,9 @@ void SwitchToTab(int index) {
     g_currentTabIndex = index;
     TabCtrl_SetCurSel(g_hTabCtrl, index);
 
+    UpdateTabTitle(index, g_tabs[index].title.c_str());
+    UpdateStarIcon();
+
     if (g_webview) {
         g_isNavigatingFromTabSwitch = true;
         g_webview->Navigate(g_tabs[index].url.c_str());
@@ -416,6 +952,7 @@ void UpdateTabTitle(int index, LPCWSTR title) {
     TabCtrl_SetItem(g_hTabCtrl, index, &tie);
 
     InvalidateRect(g_hTabCtrl, NULL, TRUE);
+    UpdateWindow(g_hTabCtrl);
 }
 
 void HandleTabClick(LPARAM lParam) {
@@ -439,6 +976,181 @@ void HandleTabClick(LPARAM lParam) {
             }
         }
     }
+}
+
+// =============================================================
+//  书签下拉列表窗口逻辑
+// =============================================================
+
+LRESULT CALLBACK BookmarkWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    static int scrollY = 0;
+    static int contentHeight = 0;
+
+    switch (message) {
+    case WM_CREATE: {
+        SCROLLINFO si = { sizeof(si), SIF_RANGE | SIF_PAGE, 0, 0, 0 };
+        SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+        scrollY = 0;
+
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+        int winW = rcClient.right - rcClient.left;
+
+        for (size_t i = 0; i < g_bookmarks.size(); ++i) {
+            int y = (int)i * BM_ROW_HEIGHT;
+            int rowIdBase = IDC_BM_ROW_BASE + (int)i * 10;
+
+            HWND hBtnGo = CreateWindow(L"BUTTON", L"➜", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, y, BM_BTN_SIZE, BM_ROW_HEIGHT, hWnd, (HMENU)(rowIdBase + 0), g_hInst, NULL);
+            SendMessage(hBtnGo, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
+            int availableW = winW - BM_BTN_SIZE * 2 - 25;
+            if (availableW < 100) availableW = 100;
+
+            int urlW = availableW * 2 / 3;
+            int titleW = availableW - urlW;
+
+            HWND hUrl = CreateWindow(L"EDIT", g_bookmarks[i].url.c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                BM_BTN_SIZE, y, urlW, BM_ROW_HEIGHT, hWnd, (HMENU)(rowIdBase + 2), g_hInst, NULL);
+            SendMessage(hUrl, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
+            HWND hTitle = CreateWindow(L"EDIT", g_bookmarks[i].title.c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                BM_BTN_SIZE + urlW, y, titleW, BM_ROW_HEIGHT, hWnd, (HMENU)(rowIdBase + 1), g_hInst, NULL);
+            SendMessage(hTitle, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
+            HWND hDel = CreateWindow(L"BUTTON", L"🗑", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                BM_BTN_SIZE + urlW + titleW, y, BM_BTN_SIZE, BM_ROW_HEIGHT, hWnd, (HMENU)(rowIdBase + 3), g_hInst, NULL);
+            SendMessage(hDel, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        }
+        contentHeight = (int)g_bookmarks.size() * BM_ROW_HEIGHT;
+        break;
+    }
+
+    case WM_SIZE: {
+        RECT rc; GetClientRect(hWnd, &rc);
+        SCROLLINFO si = { sizeof(si), SIF_RANGE | SIF_PAGE, 0, std::max(0, contentHeight), (UINT)rc.bottom };
+        SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+        break;
+    }
+
+    case WM_VSCROLL: {
+        SCROLLINFO si = { sizeof(si), SIF_ALL };
+        GetScrollInfo(hWnd, SB_VERT, &si);
+        int oldY = si.nPos;
+        switch (LOWORD(wParam)) {
+        case SB_TOP: si.nPos = si.nMin; break;
+        case SB_BOTTOM: si.nPos = si.nMax; break;
+        case SB_LINEUP: si.nPos -= BM_ROW_HEIGHT; break;
+        case SB_LINEDOWN: si.nPos += BM_ROW_HEIGHT; break;
+        case SB_PAGEUP: si.nPos -= si.nPage; break;
+        case SB_PAGEDOWN: si.nPos += si.nPage; break;
+        case SB_THUMBTRACK: si.nPos = si.nTrackPos; break;
+        }
+        si.nPos = std::max(si.nMin, std::min(si.nPos, si.nMax - (int)si.nPage + 1));
+        if (si.nMax < (int)si.nPage) si.nPos = 0;
+
+        SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+        ScrollWindow(hWnd, 0, oldY - si.nPos, NULL, NULL);
+        scrollY = si.nPos;
+        return 0;
+    }
+
+                   // [新增] 滚轮支持
+    case WM_MOUSEWHEEL: {
+        SCROLLINFO si = { sizeof(si), SIF_ALL };
+        GetScrollInfo(hWnd, SB_VERT, &si);
+        int oldY = si.nPos;
+        si.nPos -= (GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA) * BM_ROW_HEIGHT;
+        si.nPos = std::max(si.nMin, std::min(si.nPos, si.nMax - (int)si.nPage + 1));
+        if (si.nMax < (int)si.nPage) si.nPos = 0;
+        SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+        ScrollWindow(hWnd, 0, oldY - si.nPos, NULL, NULL);
+        scrollY = si.nPos;
+        return 0;
+    }
+
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        int code = HIWORD(wParam);
+
+        if (id >= IDC_BM_ROW_BASE && code == EN_CHANGE) {
+            int idx = (id - IDC_BM_ROW_BASE) / 10;
+            int type = (id - IDC_BM_ROW_BASE) % 10; // 1=Title, 2=Url
+            if (idx >= 0 && idx < g_bookmarks.size()) {
+                WCHAR buf[2048];
+                GetWindowText((HWND)lParam, buf, 2048);
+                if (type == 1) g_bookmarks[idx].title = buf;
+                if (type == 2) g_bookmarks[idx].url = buf;
+            }
+        }
+        else if (id >= IDC_BM_ROW_BASE && code == BN_CLICKED) {
+            int idx = (id - IDC_BM_ROW_BASE) / 10;
+            int type = (id - IDC_BM_ROW_BASE) % 10; // 0=Go, 3=Del
+
+            if (idx >= 0 && idx < g_bookmarks.size()) {
+                if (type == 0) { // Go
+                    if (g_webview) g_webview->Navigate(g_bookmarks[idx].url.c_str());
+                    DestroyWindow(hWnd);
+                }
+                else if (type == 3) { // Delete
+                    g_bookmarks.erase(g_bookmarks.begin() + idx);
+                    SaveBookmarks();
+                    UpdateStarIcon();
+                    DestroyWindow(hWnd);
+                    ShowBookmarkList(g_hWnd);
+                }
+            }
+        }
+        break;
+    }
+
+    case WM_DESTROY:
+        SaveBookmarks();
+        g_hBmPopup = NULL;
+        break;
+
+    case WM_ACTIVATE:
+        if (LOWORD(wParam) == WA_INACTIVE) {
+            DestroyWindow(hWnd);
+        }
+        break;
+
+    default: return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+    return 0;
+}
+
+void ShowBookmarkList(HWND hParent) {
+    if (g_hBmPopup && IsWindow(g_hBmPopup)) {
+        DestroyWindow(g_hBmPopup);
+        return;
+    }
+
+    RECT rcMain;
+    GetClientRect(hParent, &rcMain);
+    int mainWinWidth = rcMain.right - rcMain.left;
+
+    WNDCLASS wc = { 0 };
+    wc.lpfnWndProc = BookmarkWndProc;
+    wc.hInstance = g_hInst;
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"XiaoChuangBookmarks";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClass(&wc);
+
+    POINT pt = { rcMain.left, TOTAL_TOP_HEIGHT };
+    ClientToScreen(hParent, &pt);
+
+    int height = (int)g_bookmarks.size() * BM_ROW_HEIGHT;
+    if (height > BM_MAX_HEIGHT) height = BM_MAX_HEIGHT;
+    if (height < 50) height = 50;
+
+    g_hBmPopup = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"XiaoChuangBookmarks", L"",
+        WS_POPUP | WS_VISIBLE | WS_BORDER | WS_VSCROLL,
+        pt.x, pt.y, mainWinWidth, height, hParent, NULL, g_hInst, NULL);
+
+    ShowWindow(g_hBmPopup, SW_SHOW);
+    SetFocus(g_hBmPopup);
 }
 
 // =============================================================
@@ -552,6 +1264,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     return DefWindowProc(hDlg, message, wParam, lParam);
 }
 
+// [补全] 确保函数存在
 void OpenSettingsWindow(HWND hParent) {
     WNDCLASS wc = { 0 }; wc.lpfnWndProc = SettingsWndProc; wc.hInstance = g_hInst;
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.lpszClassName = L"XiaoChuangSettings";
@@ -591,17 +1304,37 @@ void ResizeLayout(HWND hWnd) {
         if (g_hBtnMove) MoveWindow(g_hBtnMove, (width - moveBtnW) / 2, 0, moveBtnW, DRAG_BAR_HEIGHT, TRUE);
 
         int tabBtnW = 25;
-        if (g_hTabCtrl) MoveWindow(g_hTabCtrl, 0, DRAG_BAR_HEIGHT, width - tabBtnW * 2, TAB_BAR_HEIGHT, TRUE);
-        if (g_hBtnAddTab) MoveWindow(g_hBtnAddTab, width - tabBtnW * 2, DRAG_BAR_HEIGHT, tabBtnW, TAB_BAR_HEIGHT, TRUE);
-        if (g_hBtnCloseTab) MoveWindow(g_hBtnCloseTab, width - tabBtnW, DRAG_BAR_HEIGHT, tabBtnW, TAB_BAR_HEIGHT, TRUE);
+        if (g_hBtnCloseApp) MoveWindow(g_hBtnCloseApp, width - tabBtnW, DRAG_BAR_HEIGHT, tabBtnW, TAB_BAR_HEIGHT, TRUE);
+        if (g_hBtnCloseTab) MoveWindow(g_hBtnCloseTab, width - tabBtnW * 2, DRAG_BAR_HEIGHT, tabBtnW, TAB_BAR_HEIGHT, TRUE);
+        if (g_hBtnAddTab) MoveWindow(g_hBtnAddTab, width - tabBtnW * 3, DRAG_BAR_HEIGHT, tabBtnW, TAB_BAR_HEIGHT, TRUE);
+        if (g_hTabCtrl) MoveWindow(g_hTabCtrl, 0, DRAG_BAR_HEIGHT, width - tabBtnW * 3, TAB_BAR_HEIGHT, TRUE);
 
-        int btnWidth = 50; int setBtnWidth = 60; int padding = 5;
+        int btnW = 35;
+        int setBtnW = 50;
+        int padding = 5;
         int navY = DRAG_BAR_HEIGHT + TAB_BAR_HEIGHT;
         int navH = NAV_BAR_HEIGHT - 4;
 
-        if (g_hEditUrl) MoveWindow(g_hEditUrl, padding, navY, width - btnWidth - setBtnWidth - padding * 4, navH, TRUE);
-        if (g_hBtnGo) MoveWindow(g_hBtnGo, width - btnWidth - setBtnWidth - padding * 2, navY, btnWidth, navH, TRUE);
-        if (g_hBtnSet) MoveWindow(g_hBtnSet, width - setBtnWidth - padding, navY, setBtnWidth, navH, TRUE);
+        // [调整] [Star][Down][Go][Preset][Set]
+        int rightTotal = setBtnW * 2 + btnW * 3 + padding * 6; // Set + Preset (use set width)
+        int addrW = width - rightTotal - padding;
+
+        if (g_hEditUrl) MoveWindow(g_hEditUrl, padding, navY, addrW, navH, TRUE);
+
+        int x = padding + addrW + padding;
+        if (g_hBtnStar) MoveWindow(g_hBtnStar, x, navY, btnW, navH, TRUE);
+
+        x += btnW + padding;
+        if (g_hBtnBmList) MoveWindow(g_hBtnBmList, x, navY, btnW, navH, TRUE);
+
+        x += btnW + padding;
+        if (g_hBtnGo) MoveWindow(g_hBtnGo, x, navY, btnW, navH, TRUE);
+
+        x += btnW + padding;
+        if (g_hBtnPreset) MoveWindow(g_hBtnPreset, x, navY, setBtnW, navH, TRUE);
+
+        x += setBtnW + padding;
+        if (g_hBtnSet) MoveWindow(g_hBtnSet, x, navY, setBtnW, navH, TRUE);
     }
 
     if (g_controller) {
@@ -610,7 +1343,6 @@ void ResizeLayout(HWND hWnd) {
             webViewBounds = { 0, 0, width, height };
         }
         else {
-            // [修复] 铺满窗口底部，防止白边
             webViewBounds = { 0, TOTAL_TOP_HEIGHT, width, height };
         }
         g_controller->put_Bounds(webViewBounds);
@@ -661,6 +1393,28 @@ void InitWebView2(HWND hWnd) {
                                         return S_OK;
                                     }).Get(), nullptr);
 
+                            g_webview->add_NavigationStarting(
+                                Callback<ICoreWebView2NavigationStartingEventHandler>(
+                                    [](ICoreWebView2* sender, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+                                        if (!g_isNavigatingFromTabSwitch) {
+                                            UpdateTabTitle(g_currentTabIndex, L"加载中...");
+                                        }
+                                        return S_OK;
+                                    }).Get(), nullptr);
+
+                            g_webview->add_NavigationCompleted(
+                                Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                                    [](ICoreWebView2* sender, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
+                                        g_isNavigatingFromTabSwitch = false;
+                                        wil::unique_cotaskmem_string title;
+                                        sender->get_DocumentTitle(&title);
+                                        if (title.get()) {
+                                            UpdateTabTitle(g_currentTabIndex, title.get());
+                                        }
+                                        UpdateStarIcon();
+                                        return S_OK;
+                                    }).Get(), nullptr);
+
                             g_webview->add_DocumentTitleChanged(
                                 Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
                                     [](ICoreWebView2* sender, IUnknown* args) -> HRESULT {
@@ -679,8 +1433,8 @@ void InitWebView2(HWND hWnd) {
                                             if (!g_isNavigatingFromTabSwitch && g_currentTabIndex >= 0 && g_currentTabIndex < g_tabs.size()) {
                                                 g_tabs[g_currentTabIndex].url = uri.get();
                                             }
-                                            g_isNavigatingFromTabSwitch = false;
                                         }
+                                        UpdateStarIcon(); // [核心修复] 地址变化时(如重定向)立即检查
                                         return S_OK;
                                     }).Get(), nullptr);
 
@@ -721,15 +1475,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         g_hEditUrl = CreateWindowEx(WS_EX_CLIENTEDGE, _T("EDIT"), _T(""), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, (HMENU)IDC_ADDRESS_BAR, g_hInst, NULL);
         SendMessage(g_hEditUrl, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
 
+        g_OldEditProc = (WNDPROC)SetWindowLongPtr(g_hEditUrl, GWLP_WNDPROC, (LONG_PTR)EditWndProc);
+
+        g_hBtnStar = CreateWindow(_T("BUTTON"), _T("☆"), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, (HMENU)IDC_BTN_STAR, g_hInst, NULL);
+        SendMessage(g_hBtnStar, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
+        g_hBtnBmList = CreateWindow(_T("BUTTON"), _T("⌵"), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, (HMENU)IDC_BTN_BMLIST, g_hInst, NULL);
+        SendMessage(g_hBtnBmList, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
         g_hBtnGo = CreateWindow(_T("BUTTON"), _T("Go"), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, (HMENU)IDC_GO_BUTTON, g_hInst, NULL);
         SendMessage(g_hBtnGo, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
+        g_hBtnPreset = CreateWindow(_T("BUTTON"), _T("预设"), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, (HMENU)IDC_BTN_PRESET, g_hInst, NULL);
+        SendMessage(g_hBtnPreset, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
 
         g_hBtnSet = CreateWindow(_T("BUTTON"), _T("设置"), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, (HMENU)IDC_SET_BUTTON, g_hInst, NULL);
         SendMessage(g_hBtnSet, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
 
         g_hBtnMove = CreateWindow(_T("BUTTON"), _T("✥"), WS_CHILD | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, (HMENU)IDC_MOVE_BUTTON, g_hInst, NULL);
         SendMessage(g_hBtnMove, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-
         g_OldBtnProc = (WNDPROC)SetWindowLongPtr(g_hBtnMove, GWLP_WNDPROC, (LONG_PTR)DragButtonProc);
 
         g_hTabCtrl = CreateWindow(WC_TABCONTROL, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED, 0, 0, 0, 0, hWnd, (HMENU)IDC_TAB_CTRL, g_hInst, NULL);
@@ -741,6 +1505,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
         g_hBtnCloseTab = CreateWindow(_T("BUTTON"), _T("-"), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, (HMENU)IDC_CLOSE_TAB, g_hInst, NULL);
         SendMessage(g_hBtnCloseTab, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+
+        g_hBtnCloseApp = CreateWindow(_T("BUTTON"), _T("×"), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, (HMENU)IDC_BTN_CLOSE_APP, g_hInst, NULL);
+        SendMessage(g_hBtnCloseApp, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
 
         SetTimer(hWnd, 1, 16, NULL);
         InitWebView2(hWnd);
@@ -823,6 +1590,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         else if (LOWORD(wParam) == IDC_SET_BUTTON) OpenSettingsWindow(hWnd);
         else if (LOWORD(wParam) == IDC_ADD_TAB) CreateNewTab(g_homeUrl.c_str(), L"New Tab", true);
         else if (LOWORD(wParam) == IDC_CLOSE_TAB) CloseCurrentTab();
+        else if (LOWORD(wParam) == IDC_BTN_CLOSE_APP) SendMessage(hWnd, WM_CLOSE, 0, 0);
+        else if (LOWORD(wParam) == IDC_BTN_STAR) ToggleCurrentBookmark();
+        else if (LOWORD(wParam) == IDC_BTN_BMLIST) ShowBookmarkList(hWnd);
+        else if (LOWORD(wParam) == IDC_BTN_PRESET) ShowPresetList(hWnd);
         break;
 
     case WM_SIZE: ResizeLayout(hWnd); break;
@@ -847,6 +1618,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 if (IsWindowVisible(g_hTabCtrl)) ShowWindow(g_hTabCtrl, SW_HIDE);
                 if (IsWindowVisible(g_hBtnAddTab)) ShowWindow(g_hBtnAddTab, SW_HIDE);
                 if (IsWindowVisible(g_hBtnCloseTab)) ShowWindow(g_hBtnCloseTab, SW_HIDE);
+                if (IsWindowVisible(g_hBtnCloseApp)) ShowWindow(g_hBtnCloseApp, SW_HIDE);
+                ShowWindow(g_hBtnStar, SW_HIDE);
+                ShowWindow(g_hBtnBmList, SW_HIDE);
+                ShowWindow(g_hBtnPreset, SW_HIDE);
             }
             else {
                 POINT pt; GetCursorPos(&pt); ScreenToClient(hWnd, &pt);
@@ -858,26 +1633,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 if (!IsWindowVisible(g_hTabCtrl)) ShowWindow(g_hTabCtrl, SW_SHOW);
                 if (!IsWindowVisible(g_hBtnAddTab)) ShowWindow(g_hBtnAddTab, SW_SHOW);
                 if (!IsWindowVisible(g_hBtnCloseTab)) ShowWindow(g_hBtnCloseTab, SW_SHOW);
+                if (!IsWindowVisible(g_hBtnCloseApp)) ShowWindow(g_hBtnCloseApp, SW_SHOW);
+                ShowWindow(g_hBtnStar, SW_SHOW);
+                ShowWindow(g_hBtnBmList, SW_SHOW);
+                ShowWindow(g_hBtnPreset, SW_SHOW);
             }
         }
         break;
 
-        // [核心修复] 老板键隐藏逻辑：显式控制 WebView 可见性，防止画面残留
     case WM_HOTKEY: {
         if (IsUserTyping() || (GetFocus() == g_hEditUrl)) break;
 
         if (wParam == g_hkHideWin.id) {
             g_isWindowHidden = !g_isWindowHidden;
 
-            // 1. 显式开关渲染，解决Ghost Window问题
             if (g_controller) {
                 g_controller->put_IsVisible(!g_isWindowHidden);
             }
 
-            // 2. 隐藏/显示主窗口
             ShowWindow(hWnd, g_isWindowHidden ? SW_HIDE : SW_SHOW);
 
-            // 3. 执行自动暂停
             if (g_isWindowHidden && g_autoPauseOnHide) {
                 ExecuteScript(L"document.querySelector('video').pause();");
             }
@@ -898,6 +1673,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (g_isImmersionMode) {
                 ShowWindow(g_hEditUrl, SW_HIDE); ShowWindow(g_hBtnGo, SW_HIDE); ShowWindow(g_hBtnSet, SW_HIDE); ShowWindow(g_hBtnMove, SW_HIDE);
                 ShowWindow(g_hTabCtrl, SW_HIDE); ShowWindow(g_hBtnAddTab, SW_HIDE); ShowWindow(g_hBtnCloseTab, SW_HIDE);
+                ShowWindow(g_hBtnCloseApp, SW_HIDE);
+                ShowWindow(g_hBtnStar, SW_HIDE);
+                ShowWindow(g_hBtnBmList, SW_HIDE);
+                ShowWindow(g_hBtnPreset, SW_HIDE);
 
                 SetWindowLong(hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
                 SetWindowLongPtr(hWnd, GWL_EXSTYLE, exStyle | WS_EX_LAYERED | WS_EX_TRANSPARENT);
@@ -926,6 +1705,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 SetWindowPos(hWnd, NULL, rc.left, newY, w, h + TOTAL_TOP_HEIGHT, SWP_NOZORDER | SWP_FRAMECHANGED);
                 ShowWindow(g_hEditUrl, SW_SHOW); ShowWindow(g_hBtnGo, SW_SHOW); ShowWindow(g_hBtnSet, SW_SHOW);
                 ShowWindow(g_hTabCtrl, SW_SHOW); ShowWindow(g_hBtnAddTab, SW_SHOW); ShowWindow(g_hBtnCloseTab, SW_SHOW);
+                ShowWindow(g_hBtnCloseApp, SW_SHOW);
+                ShowWindow(g_hBtnStar, SW_SHOW);
+                ShowWindow(g_hBtnBmList, SW_SHOW);
+                ShowWindow(g_hBtnPreset, SW_SHOW);
             }
             ResizeLayout(hWnd);
         }
